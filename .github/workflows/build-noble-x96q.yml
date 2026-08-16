@@ -34,7 +34,7 @@ jobs:
 
       - name: Build Noble
         run: |
-          sudo ./compile.sh \
+          ./compile.sh \
             BOARD=x96q-ddr3 \
             BRANCH=edge \
             RELEASE=noble \
