@@ -33,8 +33,11 @@ jobs:
           cat config/boards/x96q-ddr3.csc
 
       - name: Build Noble
+        env:
+          COLUMNS: "160"
+          PREFER_DOCKER: "no"
         run: |
-          ./compile.sh \
+          PREFER_DOCKER=no ./compile.sh build \
             BOARD=x96q-ddr3 \
             BRANCH=edge \
             RELEASE=noble \
