@@ -1,0 +1,58 @@
+name: Build Noble X96Q 6.12
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: v20250306
+          fetch-depth: 1
+
+      - name: Verify board
+        run: |
+          git log -1 --oneline
+          cat config/boards/x96q-ddr3.csc
+
+      - name: Build Noble
+        run: |
+          sudo ./compile.sh \
+            BOARD=x96q-ddr3 \
+            BRANCH=edge \
+            RELEASE=noble \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=xz
+
+      - name: Show result
+        if: always()
+        run: |
+          df -h
+          find output/images -maxdepth 1 -type f -ls 2>/dev/null || true
+
+      - name: Upload image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: X96Q-Noble-6.12
+          path: output/images/*
+          retention-days: 7
