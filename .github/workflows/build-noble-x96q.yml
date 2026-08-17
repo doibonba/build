@@ -1,4 +1,4 @@
-name: Build Noble X96Q 6.12
+name: Build Noble X96Q 6.12 Fix Base-Files
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
           sudo apt-get clean
           df -h
 
-      - name: Checkout fork
+      - name: Checkout X96Q source
         uses: actions/checkout@v4
         with:
           ref: v20250306
@@ -29,13 +29,100 @@ jobs:
 
       - name: Verify board
         run: |
+          echo "===== SOURCE COMMIT ====="
           git log -1 --oneline
+
+          echo
+          echo "===== X96Q BOARD ====="
           cat config/boards/x96q-ddr3.csc
+
+      # ---------------------------------------------------------
+      # FIX:
+      # Armbian v20250306 tries to scrape packages.ubuntu.com
+      # to locate base-files and sometimes fails.
+      #
+      # Noble arm64 release package is fixed:
+      # base-files_13ubuntu10_arm64.deb
+      # ---------------------------------------------------------
+      - name: Patch Noble base-files lookup
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "lib/functions/artifacts/"
+              "artifact-armbian-base-files.sh"
+          )
+
+          data = p.read_text()
+
+          old = (
+              'sleep_seconds="15" do_with_retries 10 '
+              'apt_find_upstream_package_version_and_download_url '
+              '"base-files"'
+          )
+
+          new = r'''if [[ "${RELEASE}" == "noble" && "${ARCH}" == "arm64" ]]; then
+              display_alert "Using fixed Ubuntu Noble base-files URL" "base-files" "info"
+
+              found_package_version="13ubuntu10"
+              found_package_filename="base-files_13ubuntu10_arm64.deb"
+              found_package_down_url="https://ports.ubuntu.com/ubuntu-ports/pool/main/b/base-files/base-files_13ubuntu10_arm64.deb"
+          else
+              sleep_seconds="15" do_with_retries 10 apt_find_upstream_package_version_and_download_url "base-files"
+          fi'''
+
+          if old not in data:
+              raise SystemExit(
+                  "ERROR: Could not find base-files lookup code to patch"
+              )
+
+          data = data.replace(old, new, 1)
+          p.write_text(data)
+
+          print("Noble base-files patch applied successfully.")
+          PY
+
+          echo
+          echo "===== PATCH RESULT ====="
+
+          grep -n \
+            -A12 \
+            -B3 \
+            'Using fixed Ubuntu Noble base-files URL' \
+            lib/functions/artifacts/artifact-armbian-base-files.sh
+
+      - name: Test Noble base-files URL
+        shell: bash
+        run: |
+          URL="https://ports.ubuntu.com/ubuntu-ports/pool/main/b/base-files/base-files_13ubuntu10_arm64.deb"
+
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            "$URL" \
+            -o /tmp/base-files.deb
+
+          echo
+          echo "===== BASE-FILES PACKAGE ====="
+
+          dpkg-deb -f /tmp/base-files.deb Package
+          dpkg-deb -f /tmp/base-files.deb Version
+          dpkg-deb -f /tmp/base-files.deb Architecture
+
+          echo
+          ls -lh /tmp/base-files.deb
+
+          rm -f /tmp/base-files.deb
 
       - name: Build Noble
         env:
           COLUMNS: "160"
           PREFER_DOCKER: "no"
+
         run: |
           PREFER_DOCKER=no ./compile.sh build \
             BOARD=x96q-ddr3 \
@@ -49,8 +136,15 @@ jobs:
       - name: Show result
         if: always()
         run: |
+          echo "===== DISK ====="
           df -h
-          find output/images -maxdepth 1 -type f -ls 2>/dev/null || true
+
+          echo
+          echo "===== OUTPUT ====="
+          find output/images \
+            -maxdepth 1 \
+            -type f \
+            -ls 2>/dev/null || true
 
       - name: Upload image
         if: success()
