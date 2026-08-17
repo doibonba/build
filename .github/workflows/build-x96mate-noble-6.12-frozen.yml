@@ -1,0 +1,368 @@
+name: "X96 Mate - Noble 6.12 - FROZEN"
+
+run-name: "X96 Mate Noble 6.12 FROZEN #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x96mate:
+    name: "Build X96 Mate Noble 6.12 Frozen"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+
+      # ============================================================
+      # 1. FREE DISK SPACE
+      # ============================================================
+      - name: "01 - Free disk space"
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+
+          echo
+          echo "===== DISK AFTER CLEANUP ====="
+          df -h
+
+
+      # ============================================================
+      # 2. CHECKOUT KNOWN-GOOD X96Q/X96 MATE SOURCE
+      #
+      # IMPORTANT:
+      # Keep v20250306 because our custom board/U-Boot/DTB lives here.
+      # ============================================================
+      - name: "02 - Checkout X96 Mate source"
+        uses: actions/checkout@v4
+        with:
+          ref: v20250306
+          fetch-depth: 1
+
+
+      # ============================================================
+      # 3. RENAME DISPLAY NAME ONLY
+      #
+      # Technical board ID remains:
+      #   x96q-ddr3
+      #
+      # Display name becomes:
+      #   X96 Mate
+      # ============================================================
+      - name: "03 - Brand board as X96 Mate"
+        shell: bash
+        run: |
+          set -e
+
+          BOARD_FILE="config/boards/x96q-ddr3.csc"
+
+          echo "===== ORIGINAL BOARD CONFIG ====="
+          cat "$BOARD_FILE"
+
+          echo
+          echo "===== CHANGE DISPLAY NAME ====="
+
+          sed -i \
+            's/^BOARD_NAME=.*/BOARD_NAME="X96 Mate"/' \
+            "$BOARD_FILE"
+
+          echo
+          echo "===== NEW BOARD CONFIG ====="
+          cat "$BOARD_FILE"
+
+          echo
+          echo "===== VERIFY ====="
+
+          grep -q '^BOARD_NAME="X96 Mate"$' "$BOARD_FILE" || {
+            echo "ERROR: BOARD_NAME was not changed!"
+            exit 1
+          }
+
+          grep -q \
+            'BOOT_FDT_FILE="allwinner/sun50i-h313-x96-q.dtb"' \
+            "$BOARD_FILE" || {
+            echo "ERROR: X96 Mate custom DTB configuration missing!"
+            exit 1
+          }
+
+          echo
+          echo "BOARD NAME : X96 Mate"
+          echo "BOARD ID   : x96q-ddr3"
+          echo "DTB        : allwinner/sun50i-h313-x96-q.dtb"
+          echo "STATUS     : OK"
+
+
+      # ============================================================
+      # 4. VERIFY SOURCE
+      # ============================================================
+      - name: "04 - Verify X96 Mate source"
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== SOURCE COMMIT ====="
+          git log -1 --oneline
+
+          echo
+          echo "===== BOARD ====="
+          grep -E \
+            'BOARD_NAME|BOARDFAMILY|BOOTCONFIG|KERNEL_TARGET|BOOT_FDT_FILE' \
+            config/boards/x96q-ddr3.csc
+
+          echo
+          echo "===== X96 PATCHES ====="
+          find patch/u-boot \
+            -type f \
+            -iname '*x96*' \
+            -print 2>/dev/null || true
+
+
+      # ============================================================
+      # 5. FIX UBUNTU NOBLE BASE-FILES LOOKUP
+      #
+      # Old Armbian source tries to scrape packages.ubuntu.com.
+      # That lookup caused our previous GitHub Actions failure.
+      #
+      # Use current Noble Updates arm64 base-files directly.
+      # ============================================================
+      - name: "05 - Patch Noble base-files"
+        shell: bash
+        run: |
+          set -e
+
+          FILE="lib/functions/artifacts/artifact-armbian-base-files.sh"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "lib/functions/artifacts/"
+              "artifact-armbian-base-files.sh"
+          )
+
+          data = p.read_text()
+
+          old = (
+              'sleep_seconds="15" do_with_retries 10 '
+              'apt_find_upstream_package_version_and_download_url '
+              '"base-files"'
+          )
+
+          new = r'''if [[ "${RELEASE}" == "noble" && "${ARCH}" == "arm64" ]]; then
+              display_alert \
+                  "Using fixed Ubuntu Noble base-files" \
+                  "base-files" \
+                  "info"
+
+              found_package_version="13ubuntu10.4"
+              found_package_filename="base-files_13ubuntu10.4_arm64.deb"
+              found_package_down_url="https://ports.ubuntu.com/ubuntu-ports/pool/main/b/base-files/base-files_13ubuntu10.4_arm64.deb"
+          else
+              sleep_seconds="15" do_with_retries 10 apt_find_upstream_package_version_and_download_url "base-files"
+          fi'''
+
+          if old not in data:
+              raise SystemExit(
+                  "ERROR: Cannot find original base-files lookup line"
+              )
+
+          data = data.replace(old, new, 1)
+          p.write_text(data)
+
+          print("base-files patch: OK")
+          PY
+
+          echo
+          echo "===== PATCH RESULT ====="
+
+          grep -n \
+            -A15 \
+            -B3 \
+            'Using fixed Ubuntu Noble base-files' \
+            "$FILE"
+
+
+      # ============================================================
+      # 6. TEST BASE-FILES BEFORE SPENDING 40+ MINUTES BUILDING
+      # ============================================================
+      - name: "06 - Test Noble base-files download"
+        shell: bash
+        run: |
+          set -e
+
+          URL="https://ports.ubuntu.com/ubuntu-ports/pool/main/b/base-files/base-files_13ubuntu10.4_arm64.deb"
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            "$URL" \
+            --output /tmp/base-files.deb
+
+          echo
+          echo "===== PACKAGE ====="
+
+          PACKAGE="$(dpkg-deb -f /tmp/base-files.deb Package)"
+          VERSION="$(dpkg-deb -f /tmp/base-files.deb Version)"
+          ARCH="$(dpkg-deb -f /tmp/base-files.deb Architecture)"
+
+          echo "Package      : $PACKAGE"
+          echo "Version      : $VERSION"
+          echo "Architecture : $ARCH"
+
+          [ "$PACKAGE" = "base-files" ]
+          [ "$ARCH" = "arm64" ]
+
+          echo
+          echo "base-files test: OK"
+
+          rm -f /tmp/base-files.deb
+
+
+      # ============================================================
+      # 7. BUILD
+      #
+      # BSPFREEZE=yes is VERY IMPORTANT.
+      #
+      # It freezes:
+      #   - Kernel
+      #   - DTB
+      #   - U-Boot
+      #   - BSP
+      #
+      # Prevents apt upgrade from replacing our custom X96 Mate
+      # kernel/DTB later.
+      # ============================================================
+      - name: "07 - Build X96 Mate Noble 6.12 FROZEN"
+        env:
+          COLUMNS: "160"
+          PREFER_DOCKER: "no"
+
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "       X96 MATE CUSTOM ARMBIAN"
+          echo "========================================"
+          echo
+          echo "BOARD       = x96q-ddr3"
+          echo "BOARD_NAME  = X96 Mate"
+          echo "RELEASE     = noble"
+          echo "BRANCH      = edge"
+          echo "BSPFREEZE   = yes"
+          echo "DTB         = sun50i-h313-x96-q.dtb"
+          echo
+          echo "========================================"
+
+          PREFER_DOCKER=no ./compile.sh build \
+            BOARD=x96q-ddr3 \
+            BRANCH=edge \
+            RELEASE=noble \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            BSPFREEZE=yes \
+            COMPRESS_OUTPUTIMAGE=xz
+
+
+      # ============================================================
+      # 8. VERIFY OUTPUT
+      # ============================================================
+      - name: "08 - Verify build output"
+        if: success()
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== IMAGES ====="
+
+          find output/images \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n'
+
+          IMAGE_COUNT=$(
+            find output/images \
+              -maxdepth 1 \
+              -type f \
+              -name '*.img.xz' \
+              | wc -l
+          )
+
+          echo
+          echo "Image count: $IMAGE_COUNT"
+
+          if [ "$IMAGE_COUNT" -lt 1 ]; then
+              echo "ERROR: No .img.xz generated!"
+              exit 1
+          fi
+
+          echo
+          echo "===== SIZE ====="
+          ls -lh output/images/*.img.xz
+
+
+      # ============================================================
+      # 9. SHOW DEBUG INFO EVEN IF BUILD FAILS
+      # ============================================================
+      - name: "09 - Build summary"
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo " X96 MATE BUILD SUMMARY"
+          echo "========================================"
+
+          echo
+          echo "Board technical ID:"
+          echo "  x96q-ddr3"
+
+          echo
+          echo "Display name:"
+          echo "  X96 Mate"
+
+          echo
+          echo "Custom DTB:"
+          echo "  allwinner/sun50i-h313-x96-q.dtb"
+
+          echo
+          echo "BSP Freeze:"
+          echo "  YES"
+
+          echo
+          echo "Disk:"
+          df -h
+
+          echo
+          echo "Output:"
+          find output/images \
+            -maxdepth 1 \
+            -type f \
+            -ls 2>/dev/null || true
+
+
+      # ============================================================
+      # 10. UPLOAD
+      #
+      # Artifact name deliberately says:
+      # X96-MATE
+      #
+      # so we don't confuse it with the older X96Q builds.
+      # ============================================================
+      - name: "10 - Upload X96 Mate image"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "X96-MATE-NOBLE-6.12-FROZEN-${{ github.run_number }}"
+          path: |
+            output/images/*.img.xz
+            output/images/*.sha
+          if-no-files-found: error
+          retention-days: 14
