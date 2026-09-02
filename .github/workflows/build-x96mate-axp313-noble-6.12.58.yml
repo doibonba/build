@@ -1,0 +1,344 @@
+name: "X96 Mate AXP313 - Noble 6.12.58"
+
+run-name: "X96 Mate AXP313 Noble 6.12.58 #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x96mate-axp313:
+    name: "Build Noble with known-good CB1 boot chain"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      ARMBIAN_COMMIT: "d5bceb962bfad7c93918801201e7d782a8ec927a"
+      REFERENCE_IMAGE_URL: "https://drive.usercontent.google.com/download?id=150tH0q-WmjbOja2k7QOTKgSBevGdAdOQ&export=download&confirm=t"
+      REFERENCE_IMAGE_SHA256: "9629f81e567058efb3b03115a841a8b9b2d16fa3dea2732ee8775d3b3eb9ab82"
+      REFERENCE_BOOT_SHA256: "9cf3034d91b9d570d0459cd5833451f3cb87a936c9be9c3db5744f2697181e51"
+      REFERENCE_DTB_SHA256: "025d4b573c526d780de5008fbbef659e745c3527a59d57e031a02eb04a347945"
+      TARGET_DTB: "sun50i-h616-bigtreetech-cb1-emmc.dtb"
+
+    steps:
+      - name: "01 - Free runner disk space"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+
+          df -h
+
+      - name: "02 - Checkout exact Armbian source"
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          ref: "${{ env.ARMBIAN_COMMIT }}"
+          fetch-depth: 1
+          path: armbian
+
+      - name: "03 - Configure X96 Mate AXP313 board"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BOARD_FILE="armbian/config/boards/bigtreetech-cb1.conf"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          board = Path("armbian/config/boards/bigtreetech-cb1.conf")
+          data = board.read_text()
+
+          replacements = {
+              'BOARD_NAME="BigTreeTech CB1"':
+                  'BOARD_NAME="X96 Mate AXP313"',
+              'BOOT_FDT_FILE="sun50i-h616-bigtreetech-cb1-sd.dtb"':
+                  'BOOT_FDT_FILE="sun50i-h616-bigtreetech-cb1-emmc.dtb"',
+          }
+
+          for old, new in replacements.items():
+              if old not in data:
+                  raise SystemExit(f"Missing expected board setting: {old}")
+              data = data.replace(old, new, 1)
+
+          extension = 'enable_extension "uwe5622-allwinner"'
+          if extension not in data:
+              data = data.rstrip() + "\n" + extension + "\n"
+
+          board.write_text(data)
+          PY
+
+          cat "$BOARD_FILE"
+
+          grep -Fxq 'BOARD_NAME="X96 Mate AXP313"' "$BOARD_FILE"
+          grep -Fxq 'BOOTCONFIG="bigtreetech_cb1_defconfig"' "$BOARD_FILE"
+          grep -Fxq "BOOT_FDT_FILE=\"$TARGET_DTB\"" "$BOARD_FILE"
+          grep -Fxq 'enable_extension "uwe5622-allwinner"' "$BOARD_FILE"
+
+      - name: "04 - Verify pinned source and hardware support"
+        shell: bash
+        working-directory: armbian
+        run: |
+          set -euo pipefail
+
+          test "$(git rev-parse HEAD)" = "$ARMBIAN_COMMIT"
+
+          SOURCE_FILE="config/sources/families/include/sunxi64_common.inc"
+          BOARD_FILE="config/boards/bigtreetech-cb1.conf"
+          UBOOT_PATCH="patch/u-boot/u-boot-sunxi/board_bigtreetech-cb1/bigtreetech-cb1-dts-and-deconfig.patch"
+          KERNEL_PATCH="patch/kernel/archive/sunxi-6.12/patches.armbian/arm64-dts-sun50i-h616-bigtreetech-cb1-sd-emmc.patch"
+
+          grep -Fq 'KERNELBRANCH="tag:v6.12.58"' "$SOURCE_FILE"
+          grep -Fq 'BOOTCONFIG="bigtreetech_cb1_defconfig"' "$BOARD_FILE"
+          grep -Fq 'CONFIG_AXP313_POWER=y' "$UBOOT_PATCH"
+          grep -Fq "$TARGET_DTB" "$KERNEL_PATCH"
+
+          echo "Armbian source : $(git rev-parse HEAD)"
+          echo "Kernel         : 6.12.58 current"
+          echo "U-Boot board   : bigtreetech_cb1_defconfig"
+          echo "PMIC           : AXP313"
+          echo "Default DTB    : $TARGET_DTB"
+          echo "Wi-Fi          : UWE5622 extension enabled"
+
+      - name: "05 - Extract known-good X96 Mate bootloader"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reference
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            "$REFERENCE_IMAGE_URL" \
+            --output reference/trixie-known-good.img.xz
+
+          echo "$REFERENCE_IMAGE_SHA256  reference/trixie-known-good.img.xz" \
+            | sha256sum --check --strict
+
+          # Allwinner SPL/U-Boot starts at byte 8192.  The first partition
+          # starts at byte 4194304, so replacing this 1 MiB region cannot
+          # touch the partition table, BOOT partition or root filesystem.
+          set +o pipefail
+          xz -dc reference/trixie-known-good.img.xz \
+            | dd \
+                of=reference/known-good-boot-region.bin \
+                bs=8192 \
+                skip=1 \
+                count=128 \
+                status=none
+          set -o pipefail
+
+          test "$(stat -c '%s' reference/known-good-boot-region.bin)" \
+            -eq 1048576
+
+          echo "$REFERENCE_BOOT_SHA256  reference/known-good-boot-region.bin" \
+            | sha256sum --check --strict
+
+          strings reference/known-good-boot-region.bin \
+            | grep -Fq 'U-Boot SPL 2024.07-g4bfaf011-dirty'
+          strings reference/known-good-boot-region.bin \
+            | grep -Fq 'Bigtreetech CB1 for TX6S H616 LPDDR4 by BaoMaker'
+
+          rm -f reference/trixie-known-good.img.xz
+
+          echo "Known-good H616 LPDDR4 AXP313 bootloader: verified"
+
+      - name: "06 - Build Noble server image"
+        shell: bash
+        working-directory: armbian
+        env:
+          COLUMNS: "160"
+          PREFER_DOCKER: "no"
+        run: |
+          set -euo pipefail
+
+          PREFER_DOCKER=no ./compile.sh build \
+            BOARD=bigtreetech-cb1 \
+            BRANCH=current \
+            RELEASE=noble \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            BSPFREEZE=yes \
+            COMPRESS_OUTPUTIMAGE=xz
+
+      - name: "07 - Inject bootloader and verify final image"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t IMAGES < <(
+            find armbian/output/images \
+              -maxdepth 1 \
+              -type f \
+              -name '*.img.xz' \
+              -print
+          )
+
+          if [ "${#IMAGES[@]}" -ne 1 ]; then
+            echo "Expected exactly one image, found ${#IMAGES[@]}"
+            printf '%s\n' "${IMAGES[@]}"
+            exit 1
+          fi
+
+          SOURCE_XZ="${IMAGES[0]}"
+          RAW_IMAGE="${SOURCE_XZ%.xz}"
+
+          xz --decompress --threads=0 "$SOURCE_XZ"
+
+          PARTITION_JSON="$(sfdisk --json "$RAW_IMAGE")"
+          test -n "$PARTITION_JSON"
+          PARTITION_START="$(
+            jq -r '.partitiontable.partitions[0].start' \
+              <<<"$PARTITION_JSON"
+          )"
+          ROOT_PARTITION_START="$(
+            jq -r '.partitiontable.partitions[1].start' \
+              <<<"$PARTITION_JSON"
+          )"
+
+          if ! [[ "$PARTITION_START" =~ ^[0-9]+$ ]]; then
+            echo "Cannot determine first partition start"
+            exit 1
+          fi
+
+          if ! [[ "$ROOT_PARTITION_START" =~ ^[0-9]+$ ]]; then
+            echo "Cannot determine root partition start"
+            exit 1
+          fi
+
+          BOOT_REGION_END=$((8192 + 1048576))
+          FIRST_PARTITION_OFFSET=$((PARTITION_START * 512))
+          ROOT_PARTITION_OFFSET=$((ROOT_PARTITION_START * 512))
+
+          if [ "$BOOT_REGION_END" -ge "$FIRST_PARTITION_OFFSET" ]; then
+            echo "Refusing to write: boot region overlaps first partition"
+            exit 1
+          fi
+
+          dd \
+            if=reference/known-good-boot-region.bin \
+            of="$RAW_IMAGE" \
+            bs=8192 \
+            seek=1 \
+            count=128 \
+            conv=notrunc \
+            status=none
+
+          dd \
+            if="$RAW_IMAGE" \
+            of=reference/final-boot-region.bin \
+            bs=8192 \
+            skip=1 \
+            count=128 \
+            status=none
+
+          echo "$REFERENCE_BOOT_SHA256  reference/final-boot-region.bin" \
+            | sha256sum --check --strict
+
+          MOUNT_DIR="$(mktemp -d)"
+          cleanup() {
+            mountpoint -q "$MOUNT_DIR" && sudo umount "$MOUNT_DIR"
+            rmdir "$MOUNT_DIR" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sudo mount \
+            -o "loop,ro,offset=$FIRST_PARTITION_OFFSET" \
+            "$RAW_IMAGE" \
+            "$MOUNT_DIR"
+
+          grep -Fxq "fdtfile=$TARGET_DTB" "$MOUNT_DIR/armbianEnv.txt"
+          test -f "$MOUNT_DIR/dtb/allwinner/$TARGET_DTB"
+          echo "$REFERENCE_DTB_SHA256  $MOUNT_DIR/dtb/allwinner/$TARGET_DTB" \
+            | sha256sum --check --strict
+          test -f "$MOUNT_DIR/Image"
+
+          echo "===== FINAL BOOT CONFIG ====="
+          cat "$MOUNT_DIR/armbianEnv.txt"
+
+          sudo umount "$MOUNT_DIR"
+
+          # Keep the same known-good U-Boot in the installed system.  This
+          # is the file used by armbian-install when writing boot code to
+          # another SD card or to eMMC.
+          sudo mount \
+            -o "loop,rw,offset=$ROOT_PARTITION_OFFSET" \
+            "$RAW_IMAGE" \
+            "$MOUNT_DIR"
+
+          INSTALLED_UBOOT="$MOUNT_DIR/usr/lib/linux-u-boot-current-bigtreetech-cb1/u-boot-sunxi-with-spl.bin"
+          test -f "$INSTALLED_UBOOT"
+
+          sudo install \
+            -m 0644 \
+            reference/known-good-boot-region.bin \
+            "$INSTALLED_UBOOT"
+
+          sync
+
+          echo "$REFERENCE_BOOT_SHA256  $INSTALLED_UBOOT" \
+            | sha256sum --check --strict
+
+          sudo umount "$MOUNT_DIR"
+          trap - EXIT
+          rmdir "$MOUNT_DIR"
+
+          rm -f armbian/output/images/*.sha
+          rm -f armbian/output/images/*.sha256
+
+          FINAL_BASE="armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58"
+          mv "$RAW_IMAGE" "$FINAL_BASE.img"
+
+          xz --compress --threads=0 -6 "$FINAL_BASE.img"
+          sha256sum "$FINAL_BASE.img.xz" > "$FINAL_BASE.img.xz.sha256"
+
+          echo "===== FINAL FILES ====="
+          ls -lh "$FINAL_BASE.img.xz" "$FINAL_BASE.img.xz.sha256"
+          cat "$FINAL_BASE.img.xz.sha256"
+
+      - name: "08 - Build summary"
+        if: always()
+        shell: bash
+        run: |
+          echo "============================================"
+          echo " X96 MATE AXP313 NOBLE 6.12.58 BUILD SUMMARY"
+          echo "============================================"
+          echo "Armbian commit : $ARMBIAN_COMMIT"
+          echo "Board ID       : bigtreetech-cb1"
+          echo "Display name   : X96 Mate AXP313"
+          echo "Kernel         : 6.12.58-current-sunxi64"
+          echo "DTB            : $TARGET_DTB"
+          echo "Bootloader     : known-good BaoMaker U-Boot 2024.07"
+          echo "Wi-Fi          : UWE5622"
+          echo "BSP freeze     : yes"
+          echo
+          df -h
+          echo
+          find armbian/output/images \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f %s bytes\n' 2>/dev/null || true
+
+      - name: "09 - Upload Noble image"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "X96-MATE-AXP313-NOBLE-6.12.58-${{ github.run_number }}"
+          path: |
+            armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58.img.xz
+            armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58.img.xz.sha256
+          if-no-files-found: error
+          retention-days: 14
