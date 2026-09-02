@@ -196,7 +196,12 @@ jobs:
           SOURCE_XZ="${IMAGES[0]}"
           RAW_IMAGE="${SOURCE_XZ%.xz}"
 
-          xz --decompress --threads=0 "$SOURCE_XZ"
+          # Stream extraction creates a runner-owned output file.  Plain
+          # `xz --decompress` tries to preserve the root-owned file group
+          # produced by Armbian and exits with EPERM on GitHub runners.
+          xz --decompress --stdout --threads=0 "$SOURCE_XZ" \
+            > "$RAW_IMAGE"
+          rm -f "$SOURCE_XZ"
 
           PARTITION_JSON="$(sfdisk --json "$RAW_IMAGE")"
           test -n "$PARTITION_JSON"
@@ -299,10 +304,12 @@ jobs:
           rm -f armbian/output/images/*.sha
           rm -f armbian/output/images/*.sha256
 
-          FINAL_BASE="armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58"
+          FINAL_BASE="armbian/output/images/X96-Mate_AXP313_Noble_current-6.12.58"
           mv "$RAW_IMAGE" "$FINAL_BASE.img"
 
-          xz --compress --threads=0 -6 "$FINAL_BASE.img"
+          xz --compress --stdout --threads=0 -6 "$FINAL_BASE.img" \
+            > "$FINAL_BASE.img.xz"
+          rm -f "$FINAL_BASE.img"
           sha256sum "$FINAL_BASE.img.xz" > "$FINAL_BASE.img.xz.sha256"
 
           echo "===== FINAL FILES ====="
@@ -338,7 +345,7 @@ jobs:
         with:
           name: "X96-MATE-AXP313-NOBLE-6.12.58-${{ github.run_number }}"
           path: |
-            armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58.img.xz
-            armbian/output/images/X96-Mate_AXP313_Armbian-25.11.1_Noble_current-6.12.58.img.xz.sha256
+            armbian/output/images/X96-Mate_AXP313_Noble_current-6.12.58.img.xz
+            armbian/output/images/X96-Mate_AXP313_Noble_current-6.12.58.img.xz.sha256
           if-no-files-found: error
           retention-days: 14
