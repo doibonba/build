@@ -1,0 +1,234 @@
+name: "X96 Mate - Trixie 6.12 - FROZEN TEST"
+
+run-name: "X96 Mate Trixie 6.12 FROZEN TEST #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x96mate-trixie:
+    name: "Build X96 Mate Trixie 6.12 Frozen Test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: "01 - Free disk space"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+
+          df -h
+
+      # Keep this known-good source: it contains the X96Q DDR3/X96 Mate
+      # U-Boot, DTB and kernel 6.12.11 configuration already proven on eMMC.
+      - name: "02 - Checkout known-good X96 Mate source"
+        uses: actions/checkout@v4
+        with:
+          ref: v20250306
+          fetch-depth: 1
+
+      # Change only the user-facing name. The technical board ID must remain
+      # x96q-ddr3 so the correct U-Boot and custom DTB are selected.
+      - name: "03 - Brand board as X96 Mate"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          board_file="config/boards/x96q-ddr3.csc"
+          sed -i 's/^BOARD_NAME=.*/BOARD_NAME="X96 Mate"/' "$board_file"
+
+          grep -q '^BOARD_NAME="X96 Mate"$' "$board_file"
+          grep -q 'BOOT_FDT_FILE="allwinner/sun50i-h313-x96-q.dtb"' "$board_file"
+
+          echo "Board ID    : x96q-ddr3"
+          echo "Display name: X96 Mate"
+          echo "DTB         : allwinner/sun50i-h313-x96-q.dtb"
+
+      # Trixie is present in this old framework but marked community-supported
+      # (csc), therefore the build must use EXPERT=yes.
+      - name: "04 - Verify Trixie and kernel configuration"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(cat config/distributions/trixie/name)" = "Debian 13 Trixie"
+          test "$(cat config/distributions/trixie/support)" = "csc"
+          grep -Eq '(^|,)arm64(,|$)' config/distributions/trixie/architectures
+          grep -q 'KERNELBRANCH="tag:v6.12.11"' \
+            config/sources/families/include/sunxi64_common.inc
+
+          echo "Release     : Debian 13 Trixie"
+          echo "Architecture: arm64"
+          echo "Support     : csc (EXPERT=yes required)"
+          echo "Kernel edge : v6.12.11"
+          git log -1 --oneline
+
+      # The old framework may route its metadata request through a mirror that
+      # returns an invalid value (observed as "1"). Resolve and validate the
+      # current Debian package directly, then inject those exact values into
+      # the build source so the broken internal lookup is bypassed.
+      - name: "05 - Patch and test Trixie base-files lookup"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_url="https://github.armbian.com/base-files.json"
+          package_name="$(
+            curl --fail --silent --show-error --location \
+              --retry 5 --retry-delay 3 --retry-all-errors \
+              "$metadata_url" |
+              jq -er '.trixie.arm64'
+          )"
+
+          case "$package_name" in
+            base-files_*_arm64.deb) ;;
+            *)
+              echo "ERROR: Invalid Trixie arm64 base-files name: $package_name"
+              exit 1
+              ;;
+          esac
+
+          package_url="https://deb.debian.org/debian/pool/main/b/base-files/$package_name"
+
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 3 --retry-all-errors \
+            "$package_url" \
+            --output /tmp/base-files-trixie-arm64.deb
+
+          test "$(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Package)" = "base-files"
+          test "$(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Architecture)" = "arm64"
+
+          package_version="$(
+            dpkg-deb -f /tmp/base-files-trixie-arm64.deb Version
+          )"
+
+          echo "Package     : $(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Package)"
+          echo "Version     : $package_version"
+          echo "Architecture: $(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Architecture)"
+
+          python3 - "$package_name" "$package_version" "$package_url" <<'PY'
+          import sys
+          from pathlib import Path
+
+          package_name, package_version, package_url = sys.argv[1:]
+          path = Path(
+              "lib/functions/artifacts/artifact-armbian-base-files.sh"
+          )
+          data = path.read_text()
+
+          old = (
+              'sleep_seconds="15" do_with_retries 10 '
+              'apt_find_upstream_package_version_and_download_url '
+              '"base-files"'
+          )
+
+          new = '''if [[ "${RELEASE}" == "trixie" && "${ARCH}" == "arm64" ]]; then
+              display_alert "Using verified Debian Trixie base-files" "base-files" "info"
+
+              found_package_version="__PACKAGE_VERSION__"
+              found_package_filename="__PACKAGE_NAME__"
+              found_package_down_url="__PACKAGE_URL__"
+          else
+              sleep_seconds="15" do_with_retries 10 apt_find_upstream_package_version_and_download_url "base-files"
+          fi'''
+
+          new = (
+              new.replace("__PACKAGE_VERSION__", package_version)
+                 .replace("__PACKAGE_NAME__", package_name)
+                 .replace("__PACKAGE_URL__", package_url)
+          )
+
+          if data.count(old) != 1:
+              raise SystemExit(
+                  "ERROR: Cannot uniquely locate the internal base-files lookup"
+              )
+
+          path.write_text(data.replace(old, new, 1))
+          print("Trixie base-files source patch: OK")
+          PY
+
+          grep -n -A16 -B3 \
+            'Using verified Debian Trixie base-files' \
+            lib/functions/artifacts/artifact-armbian-base-files.sh
+
+          rm -f /tmp/base-files-trixie-arm64.deb
+
+      - name: "06 - Build X96 Mate Trixie 6.12 Frozen Test"
+        env:
+          COLUMNS: "160"
+          PREFER_DOCKER: "no"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "BOARD       = x96q-ddr3"
+          echo "BOARD_NAME  = X96 Mate"
+          echo "RELEASE     = trixie"
+          echo "BRANCH      = edge"
+          echo "KERNEL      = 6.12.11"
+          echo "EXPERT      = yes"
+          echo "BSPFREEZE   = yes"
+          echo "DTB         = sun50i-h313-x96-q.dtb"
+
+          PREFER_DOCKER=no ./compile.sh build \
+            BOARD=x96q-ddr3 \
+            BRANCH=edge \
+            RELEASE=trixie \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            EXPERT=yes \
+            BSPFREEZE=yes \
+            COMPRESS_OUTPUTIMAGE=xz
+
+      - name: "07 - Verify image output"
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image_count="$(
+            find output/images -maxdepth 1 -type f -name '*.img.xz' | wc -l
+          )"
+
+          if [ "$image_count" -lt 1 ]; then
+            echo "ERROR: No .img.xz image was generated"
+            exit 1
+          fi
+
+          find output/images -maxdepth 1 -type f -printf '%f\n'
+          ls -lh output/images/*.img.xz
+
+      - name: "08 - Build summary"
+        if: always()
+        shell: bash
+        run: |
+          echo "Board technical ID : x96q-ddr3"
+          echo "Display name       : X96 Mate"
+          echo "Distribution       : Debian 13 Trixie"
+          echo "Kernel target      : 6.12.11 edge"
+          echo "Custom DTB         : allwinner/sun50i-h313-x96-q.dtb"
+          echo "BSP freeze         : yes"
+          echo "Experimental flag  : EXPERT=yes"
+          df -h
+          find output/images -maxdepth 1 -type f -ls 2>/dev/null || true
+
+      - name: "09 - Upload X96 Mate Trixie image"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "X96-MATE-TRIXIE-6.12-FROZEN-TEST-${{ github.run_number }}"
+          path: |
+            output/images/*.img.xz
+            output/images/*.sha
+          if-no-files-found: error
+          retention-days: 14
