@@ -72,9 +72,11 @@ jobs:
           echo "Kernel edge : v6.12.11"
           git log -1 --oneline
 
-      # Check the exact metadata service and Debian package path used by this
-      # framework before spending time compiling the kernel and image.
-      - name: "05 - Test Trixie base-files lookup"
+      # The old framework may route its metadata request through a mirror that
+      # returns an invalid value (observed as "1"). Resolve and validate the
+      # current Debian package directly, then inject those exact values into
+      # the build source so the broken internal lookup is bypassed.
+      - name: "05 - Patch and test Trixie base-files lookup"
         shell: bash
         run: |
           set -euo pipefail
@@ -105,9 +107,52 @@ jobs:
           test "$(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Package)" = "base-files"
           test "$(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Architecture)" = "arm64"
 
+          package_version="$(
+            dpkg-deb -f /tmp/base-files-trixie-arm64.deb Version
+          )"
+
           echo "Package     : $(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Package)"
-          echo "Version     : $(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Version)"
+          echo "Version     : $package_version"
           echo "Architecture: $(dpkg-deb -f /tmp/base-files-trixie-arm64.deb Architecture)"
+
+          python3 - "$package_name" "$package_version" "$package_url" <<'PY'
+          import sys
+          from pathlib import Path
+
+          package_name, package_version, package_url = sys.argv[1:]
+          path = Path(
+              "lib/functions/artifacts/artifact-armbian-base-files.sh"
+          )
+          data = path.read_text()
+
+          old = (
+              'sleep_seconds="15" do_with_retries 10 '
+              'apt_find_upstream_package_version_and_download_url '
+              '"base-files"'
+          )
+
+          new = f'''if [[ "${{RELEASE}}" == "trixie" && "${{ARCH}}" == "arm64" ]]; then
+              display_alert "Using verified Debian Trixie base-files" "base-files" "info"
+
+              found_package_version="{package_version}"
+              found_package_filename="{package_name}"
+              found_package_down_url="{package_url}"
+          else
+              sleep_seconds="15" do_with_retries 10 apt_find_upstream_package_version_and_download_url "base-files"
+          fi'''
+
+          if data.count(old) != 1:
+              raise SystemExit(
+                  "ERROR: Cannot uniquely locate the internal base-files lookup"
+              )
+
+          path.write_text(data.replace(old, new, 1))
+          print("Trixie base-files source patch: OK")
+          PY
+
+          grep -n -A16 -B3 \
+            'Using verified Debian Trixie base-files' \
+            lib/functions/artifacts/artifact-armbian-base-files.sh
 
           rm -f /tmp/base-files-trixie-arm64.deb
 
