@@ -72,10 +72,9 @@ jobs:
           echo "Kernel edge : v6.12.11"
           git log -1 --oneline
 
-      # The old framework may route its metadata request through a mirror that
-      # returns an invalid value (observed as "1"). Resolve and validate the
-      # current Debian package directly, then inject those exact values into
-      # the build source so the broken internal lookup is bypassed.
+      # The old framework's unquoted jq filter fails during the build. Resolve
+      # and validate the Debian package first, then inject those exact values
+      # into the build source so the broken internal lookup is bypassed.
       - name: "05 - Patch and test Trixie base-files lookup"
         shell: bash
         run: |
@@ -161,6 +160,71 @@ jobs:
             lib/functions/artifacts/artifact-armbian-base-files.sh
 
           rm -f /tmp/base-files-trixie-arm64.deb
+
+      # This old source carries a 2015 Armbian certificate rejected by Trixie's
+      # current sqv policy. Refresh ONLY the public repository key, keeping
+      # kernel, DTB, U-Boot, and all APT signature checks unchanged.
+      # Official key location: https://docs.armbian.com/config/
+      - name: "05B - Refresh Armbian key and verify Trixie APT"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          key_check_dir="$(mktemp -d)"
+          mkdir -m 700 "$key_check_dir/gnupg"
+
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 120 \
+            --retry 3 --retry-delay 3 --retry-all-errors \
+            https://apt.armbian.com/armbian.key \
+            --output "$key_check_dir/armbian.key"
+
+          # Full fingerprint of the new signing key requested in the failed
+          # run. The HTTPS official endpoint supplies the key, not a keyserver.
+          required_fingerprint="8CFA83D13EB2181EEF5843E41EB30FAF236099FE"
+          fingerprints="$(
+            gpg --batch --no-options --homedir "$key_check_dir/gnupg" \
+              --show-keys --with-colons --with-fingerprint \
+              --with-subkey-fingerprint "$key_check_dir/armbian.key" |
+              awk -F: '$1 == "fpr" { print $10 }'
+          )"
+          if ! grep -Fxq "$required_fingerprint" <<< "$fingerprints"; then
+            echo "ERROR: Official key bundle is missing the expected signing key."
+            echo "Stopping before compilation; APT verification stays enabled."
+            exit 1
+          fi
+
+          gpg --batch --no-options --homedir "$key_check_dir/gnupg" \
+            --dearmor --output "$key_check_dir/armbian.gpg" \
+            "$key_check_dir/armbian.key"
+          chmod 644 "$key_check_dir/armbian.gpg"
+
+          # Ubuntu's host gpgv does not enforce the same SHA-1 policy as
+          # Trixie's apt/sqv. Test both repositories in a disposable Trixie
+          # container; no packages or APT sources are changed on the host.
+          # Debian repositories first supply the CA bundle over authenticated
+          # APT. Then validate both Armbian repositories without any bypass.
+          docker run --rm --pull=always \
+            --mount "type=bind,source=$key_check_dir/armbian.gpg,target=/usr/share/keyrings/armbian.gpg,readonly" \
+            debian:trixie-slim \
+            sh -eu -c '
+              export DEBIAN_FRONTEND=noninteractive
+              date -u
+              apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update
+              apt-get -y --no-install-recommends install ca-certificates
+              printf "%s\n" \
+                "deb [signed-by=/usr/share/keyrings/armbian.gpg] https://apt.armbian.com trixie main trixie-utils trixie-desktop" \
+                "deb [signed-by=/usr/share/keyrings/armbian.gpg] https://github.armbian.com/configng stable main" \
+                > /etc/apt/sources.list.d/armbian-key-test.list
+              apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update
+            '
+
+          # The existing build framework reads config/armbian.key when setting
+          # up BOTH the rootfs and final image, including the configng source.
+          install -m 644 "$key_check_dir/armbian.key" config/armbian.key
+          echo "Trixie APT signature preflight: OK"
+          echo "Armbian repository key refreshed; kernel/DTB/U-Boot unchanged."
 
       - name: "06 - Build X96 Mate Trixie 6.12 Frozen Test"
         env:
