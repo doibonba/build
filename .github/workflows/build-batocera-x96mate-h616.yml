@@ -86,19 +86,45 @@ jobs:
           grep -q '^BR2_aarch64=y$' "$board"
           grep -q '^BR2_cortex_a53=y$' "$board"
           grep -q '^BR2_PACKAGE_BATOCERA_TARGET_H616=y$' "$board"
-          grep -q '^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.5"$' "$board"
           grep -q 'allwinner/sun50i-h616-x96-mate' "$board"
           grep -q '^BR2_PACKAGE_BATOCERA_PANFROST_MESA3D=y$' "$board"
           grep -q 'x96_mate/u-boot-sunxi-with-spl.bin' "$genimage"
+
+          kernel_version="$(sed -n 's/^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="\([^"]*\)"$/\1/p' "$board")"
+          test -n "$kernel_version"
 
           echo "Target : H616 / aarch64 / Cortex-A53"
           echo "Board  : X96 Mate"
           echo "DTB    : sun50i-h616-x96-mate"
           echo "GPU    : Mali-G31 / Panfrost"
-          echo "Kernel : 7.1.5"
+          echo "Kernel : ${kernel_version}"
           echo "U-Boot : uboot-multiboard/x96_mate"
 
-      - name: "05 - Configure X96 Mate-only build"
+      - name: "05 - Patch stale Kodi Italian language mirror"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+
+          kodi_it_mk="package/batocera/kodi/kodi21-resource-language-it_it/kodi21_resource_language_it_it.mk"
+          test -f "$kodi_it_mk"
+
+          kodi_it_version="$(sed -n 's/^KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = //p' "$kodi_it_mk")"
+          test -n "$kodi_it_version"
+
+          sed -i \
+            's#https://mirrors.kodi.tv/addons/omega/resource.language.it_it#https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it#g' \
+            "$kodi_it_mk"
+
+          grep -Fq \
+            'https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it' \
+            "$kodi_it_mk"
+
+          echo "Kodi Italian language version: ${kodi_it_version}"
+          echo "Kodi Italian mirror: https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it"
+
+      - name: "06 - Configure X96 Mate-only build"
         shell: bash
         run: |
           set -euo pipefail
@@ -121,7 +147,7 @@ jobs:
           grep -Fq 'BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate"' /tmp/batocera-vars.txt
           grep -Fq 'BR2_GNU_MIRROR="https://mirrors.ibiblio.org/gnu"' /tmp/batocera-vars.txt
 
-      - name: "06 - Build official Batocera Docker environment"
+      - name: "07 - Build official Batocera Docker environment"
         shell: bash
         run: |
           set -euo pipefail
@@ -134,7 +160,7 @@ jobs:
           echo
           df -h /mnt/batocera-build /
 
-      - name: "07 - Fetch Batocera sources with retries"
+      - name: "08 - Fetch Batocera sources with retries"
         shell: bash
         run: |
           set -euo pipefail
@@ -166,7 +192,7 @@ jobs:
           du -sh /mnt/batocera-build/dl || true
           df -h /mnt/batocera-build
 
-      - name: "08 - Build Batocera H616 X96 Mate"
+      - name: "09 - Build Batocera H616 X96 Mate"
         shell: bash
         run: |
           set -euo pipefail
@@ -174,7 +200,7 @@ jobs:
           cd /mnt/batocera-build/src
           make h616-build
 
-      - name: "09 - Validate and stage image"
+      - name: "10 - Validate and stage image"
         shell: bash
         run: |
           set -euo pipefail
@@ -221,7 +247,7 @@ jobs:
 
           echo "BATOCERA_IMAGE_NAME=$(basename "$image")" >> "$GITHUB_ENV"
 
-      - name: "10 - Upload X96 Mate image"
+      - name: "11 - Upload X96 Mate image"
         uses: actions/upload-artifact@v4
         with:
           name: "Batocera-X96-Mate-H616-${{ env.BATOCERA_SHORT_COMMIT }}"
@@ -230,7 +256,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: "11 - Summary"
+      - name: "12 - Summary"
         shell: bash
         run: |
           {
@@ -242,5 +268,6 @@ jobs:
             echo "- Board image: \`allwinner/h616/x96-mate\`"
             echo "- DTB: \`sun50i-h616-x96-mate\`"
             echo "- GNU mirror: \`https://mirrors.ibiblio.org/gnu\`"
+            echo "- Kodi Italian mirror fallback: \`https://mirrors.sunsite.dk/kodi\`"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
