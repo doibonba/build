@@ -100,7 +100,7 @@ jobs:
           echo "Kernel : ${kernel_version}"
           echo "U-Boot : uboot-multiboard/x96_mate"
 
-      - name: "05 - Patch stale Kodi Italian language mirror"
+      - name: "05 - Patch stale Kodi Italian language version"
         shell: bash
         run: |
           set -euo pipefail
@@ -110,19 +110,22 @@ jobs:
           kodi_it_mk="package/batocera/kodi/kodi21-resource-language-it_it/kodi21_resource_language_it_it.mk"
           test -f "$kodi_it_mk"
 
-          kodi_it_version="$(sed -n 's/^KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = //p' "$kodi_it_mk")"
-          test -n "$kodi_it_version"
+          old_version="$(sed -n 's/^KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = //p' "$kodi_it_mk")"
+          test -n "$old_version"
 
+          new_version="11.0.109"
           sed -i \
-            's#https://mirrors.kodi.tv/addons/omega/resource.language.it_it#https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it#g' \
+            "s/^KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = .*/KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = ${new_version}/" \
             "$kodi_it_mk"
 
-          grep -Fq \
-            'https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it' \
-            "$kodi_it_mk"
+          grep -Fq "KODI21_RESOURCE_LANGUAGE_IT_IT_VERSION = ${new_version}" "$kodi_it_mk"
+          grep -Fq 'https://mirrors.kodi.tv/addons/omega/resource.language.it_it' "$kodi_it_mk"
 
-          echo "Kodi Italian language version: ${kodi_it_version}"
-          echo "Kodi Italian mirror: https://mirrors.sunsite.dk/kodi/addons/omega/resource.language.it_it"
+          kodi_it_url="https://mirrors.kodi.tv/addons/omega/resource.language.it_it/resource.language.it_it-${new_version}.zip"
+          echo "Batocera pinned Kodi Italian: ${old_version}"
+          echo "Using current Kodi Italian:   ${new_version}"
+          echo "Checking: ${kodi_it_url}"
+          wget --spider -q -t 3 --timeout=20 "$kodi_it_url"
 
       - name: "06 - Configure X96 Mate-only build"
         shell: bash
@@ -268,6 +271,6 @@ jobs:
             echo "- Board image: \`allwinner/h616/x96-mate\`"
             echo "- DTB: \`sun50i-h616-x96-mate\`"
             echo "- GNU mirror: \`https://mirrors.ibiblio.org/gnu\`"
-            echo "- Kodi Italian mirror fallback: \`https://mirrors.sunsite.dk/kodi\`"
+            echo "- Kodi Italian language: \`11.0.109\`"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
