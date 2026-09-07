@@ -147,6 +147,22 @@ jobs:
 
           echo "Disabled obsolete Cedrus patch already upstream in Linux"
 
+          # cabextract.org.uk currently returns HTTP 403 to the Buildroot wget
+          # request, while Buildroot's source fallback does not have 1.11.
+          # Preseed the exact upstream tarball from a Gentoo distfiles mirror.
+          cabextract_version="1.11"
+          cabextract_sha256="b5546db1155e4c718ff3d4b278573604f30dd64c3c5bfd4657cd089b823a3ac6"
+          cabextract_dir="/mnt/batocera-build/dl/cabextract"
+          cabextract_file="${cabextract_dir}/cabextract-${cabextract_version}.tar.gz"
+          cabextract_url="https://ftp.uni-erlangen.de/gentoo/distfiles/e5/cabextract-${cabextract_version}.tar.gz"
+
+          mkdir -p "$cabextract_dir"
+          rm -f "$cabextract_file"
+          wget -q --show-progress -t 3 --timeout=30 -O "$cabextract_file" "$cabextract_url"
+          echo "${cabextract_sha256}  ${cabextract_file}" | sha256sum -c -
+
+          echo "Preseeded cabextract ${cabextract_version}: ${cabextract_file}"
+
       - name: "06 - Configure X96 Mate-only build"
         shell: bash
         run: |
@@ -298,5 +314,6 @@ jobs:
             echo "- Kodi Italian language: \`11.0.109\`"
             echo "- Obsolete Cedrus patch: disabled (already upstream)"
             echo "- Cargo MSRV resolver: \`fallback\`"
+            echo "- cabextract 1.11: preseeded from Gentoo distfiles mirror"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
