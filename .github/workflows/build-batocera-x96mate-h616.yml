@@ -95,10 +95,10 @@ jobs:
           echo "Board  : X96 Mate"
           echo "DTB    : sun50i-h616-x96-mate"
           echo "GPU    : Mali-G31 / Panfrost"
-          echo "Kernel : 7.1.5 (current master at workflow creation)"
+          echo "Kernel : 7.1.5"
           echo "U-Boot : uboot-multiboard/x96_mate"
 
-      - name: "05 - Restrict image generation to X96 Mate"
+      - name: "05 - Configure X96 Mate-only build"
         shell: bash
         run: |
           set -euo pipefail
@@ -106,13 +106,20 @@ jobs:
           cd /mnt/batocera-build/src
 
           cat > batocera.mk <<'EOF'
-          OUTPUT_DIR ?= /mnt/batocera-build/output
-          DL_DIR ?= /mnt/batocera-build/dl
-          CCACHE_DIR ?= /mnt/batocera-build/ccache
+          OUTPUT_DIR := /mnt/batocera-build/output
+          DL_DIR := /mnt/batocera-build/dl
+          CCACHE_DIR := /mnt/batocera-build/ccache
           $(call add-defconfig,BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate")
+          $(call add-defconfig,BR2_GNU_MIRROR="https://mirrors.ibiblio.org/gnu")
           EOF
 
-          make vars
+          make vars | tee /tmp/batocera-vars.txt
+
+          grep -Fq 'Download directory: /mnt/batocera-build/dl' /tmp/batocera-vars.txt
+          grep -Fq 'Build directory:    /mnt/batocera-build/output' /tmp/batocera-vars.txt
+          grep -Fq 'ccache directory:   /mnt/batocera-build/ccache' /tmp/batocera-vars.txt
+          grep -Fq 'BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate"' /tmp/batocera-vars.txt
+          grep -Fq 'BR2_GNU_MIRROR="https://mirrors.ibiblio.org/gnu"' /tmp/batocera-vars.txt
 
       - name: "06 - Build official Batocera Docker environment"
         shell: bash
@@ -127,7 +134,39 @@ jobs:
           echo
           df -h /mnt/batocera-build /
 
-      - name: "07 - Build Batocera H616 X96 Mate"
+      - name: "07 - Fetch Batocera sources with retries"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+
+          success=0
+          for attempt in 1 2 3 4; do
+            echo "===== SOURCE DOWNLOAD ATTEMPT ${attempt}/4 ====="
+            if make h616-source; then
+              success=1
+              break
+            fi
+
+            if [ "$attempt" -lt 4 ]; then
+              sleep_seconds=$((attempt * 20))
+              echo "Download attempt failed; retrying in ${sleep_seconds}s..."
+              sleep "$sleep_seconds"
+            fi
+          done
+
+          if [ "$success" -ne 1 ]; then
+            echo "ERROR: Unable to fetch all Batocera sources after 4 attempts"
+            exit 1
+          fi
+
+          echo
+          echo "===== DOWNLOAD CACHE ====="
+          du -sh /mnt/batocera-build/dl || true
+          df -h /mnt/batocera-build
+
+      - name: "08 - Build Batocera H616 X96 Mate"
         shell: bash
         run: |
           set -euo pipefail
@@ -135,7 +174,7 @@ jobs:
           cd /mnt/batocera-build/src
           make h616-build
 
-      - name: "08 - Validate and stage image"
+      - name: "09 - Validate and stage image"
         shell: bash
         run: |
           set -euo pipefail
@@ -159,15 +198,15 @@ jobs:
           test -s "$image"
           test -s "$image.sha256"
 
-          expected="$(cat "$image.sha256")"
+          expected="$(awk '{print $1}' "$image.sha256")"
           actual="$(sha256sum "$image" | awk '{print $1}')"
           test "$expected" = "$actual"
 
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp -v "$image" "$GITHUB_WORKSPACE/artifacts/"
           cp -v "$image.sha256" "$GITHUB_WORKSPACE/artifacts/"
-          cp -v "$image.md5" "$GITHUB_WORKSPACE/artifacts/"
-          cp -v "$image_dir/batocera.version" "$GITHUB_WORKSPACE/artifacts/"
+          [ ! -f "$image.md5" ] || cp -v "$image.md5" "$GITHUB_WORKSPACE/artifacts/"
+          [ ! -f "$image_dir/batocera.version" ] || cp -v "$image_dir/batocera.version" "$GITHUB_WORKSPACE/artifacts/"
 
           cat > "$GITHUB_WORKSPACE/artifacts/BUILD-INFO.txt" <<EOF
           Board: X96 Mate
@@ -182,7 +221,7 @@ jobs:
 
           echo "BATOCERA_IMAGE_NAME=$(basename "$image")" >> "$GITHUB_ENV"
 
-      - name: "09 - Upload X96 Mate image"
+      - name: "10 - Upload X96 Mate image"
         uses: actions/upload-artifact@v4
         with:
           name: "Batocera-X96-Mate-H616-${{ env.BATOCERA_SHORT_COMMIT }}"
@@ -191,7 +230,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: "10 - Summary"
+      - name: "11 - Summary"
         shell: bash
         run: |
           {
@@ -202,5 +241,6 @@ jobs:
             echo "- Target: \`h616\`"
             echo "- Board image: \`allwinner/h616/x96-mate\`"
             echo "- DTB: \`sun50i-h616-x96-mate\`"
+            echo "- GNU mirror: \`https://mirrors.ibiblio.org/gnu\`"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
