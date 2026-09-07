@@ -18,6 +18,8 @@ jobs:
     name: "Build Batocera for X96 Mate H616"
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      BATCH_MODE: "1"
 
     steps:
       - name: "01 - Maximize build disk"
