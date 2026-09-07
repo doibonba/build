@@ -100,13 +100,15 @@ jobs:
           echo "Kernel : ${kernel_version}"
           echo "U-Boot : uboot-multiboard/x96_mate"
 
-      - name: "05 - Patch stale Kodi Italian language version"
+      - name: "05 - Patch stale upstream components"
         shell: bash
         run: |
           set -euo pipefail
 
           cd /mnt/batocera-build/src
 
+          # Batocera master currently pins an Italian Kodi Omega language pack
+          # version that has been removed from the Kodi mirrors.
           kodi_it_mk="package/batocera/kodi/kodi21-resource-language-it_it/kodi21_resource_language_it_it.mk"
           test -f "$kodi_it_mk"
 
@@ -126,6 +128,23 @@ jobs:
           echo "Using current Kodi Italian:   ${new_version}"
           echo "Checking: ${kodi_it_url}"
           wget --spider -q -t 3 --timeout=20 "$kodi_it_url"
+
+          # This Cedrus fix is already upstream in current Linux. Keeping the
+          # legacy H616 patch makes Buildroot see it as reversed/already applied.
+          series="board/batocera/allwinner/h616/linux_patches/series"
+          obsolete_patch="patches.megous/fixes-7.1/0004-media-cedrus-Fix-failure-to-clean-up-hardware-on-pro.patch"
+
+          test -f "$series"
+          grep -Fqx "$obsolete_patch" "$series"
+          grep -Fvx "$obsolete_patch" "$series" > "${series}.tmp"
+          mv "${series}.tmp" "$series"
+
+          if grep -Fqx "$obsolete_patch" "$series"; then
+            echo "ERROR: obsolete Cedrus patch is still present"
+            exit 1
+          fi
+
+          echo "Disabled obsolete Cedrus patch already upstream in Linux"
 
       - name: "06 - Configure X96 Mate-only build"
         shell: bash
@@ -179,8 +198,11 @@ jobs:
             fi
 
             if [ "$attempt" -lt 4 ]; then
+              echo "Cleaning partial Buildroot package state before retry..."
+              rm -rf /mnt/batocera-build/output/h616/build
+
               sleep_seconds=$((attempt * 20))
-              echo "Download attempt failed; retrying in ${sleep_seconds}s..."
+              echo "Download/source attempt failed; retrying in ${sleep_seconds}s..."
               sleep "$sleep_seconds"
             fi
           done
@@ -272,5 +294,6 @@ jobs:
             echo "- DTB: \`sun50i-h616-x96-mate\`"
             echo "- GNU mirror: \`https://mirrors.ibiblio.org/gnu\`"
             echo "- Kodi Italian language: \`11.0.109\`"
+            echo "- Obsolete Cedrus patch: disabled (already upstream)"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
