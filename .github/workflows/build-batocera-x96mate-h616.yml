@@ -1,0 +1,204 @@
+name: "Batocera X96 Mate H616 - master"
+
+run-name: "Batocera X96 Mate H616 #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - batocera-x96mate
+    paths:
+      - ".github/workflows/build-batocera-x96mate-h616.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-batocera-x96mate:
+    name: "Build Batocera for X96 Mate H616"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: "01 - Maximize build disk"
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c
+        with:
+          root-reserve-mb: 4096
+          temp-reserve-mb: 512
+          swap-size-mb: 2048
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          build-mount-path: "/mnt/batocera-build"
+
+      - name: "02 - Move Docker data into build volume"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo systemctl stop docker
+          sudo rm -rf /var/lib/docker
+          sudo mkdir -p /mnt/batocera-build/docker
+          printf '%s\n' '{"data-root":"/mnt/batocera-build/docker"}' | \
+            sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl start docker
+
+          echo "===== DISK ====="
+          df -h
+          echo
+          echo "===== MEMORY ====="
+          free -h
+          echo
+          echo "===== DOCKER ====="
+          docker info --format 'DockerRootDir={{.DockerRootDir}} Driver={{.Driver}}'
+
+      - name: "03 - Clone current Batocera master"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build
+          git clone --depth 1 \
+            https://github.com/batocera-linux/batocera.linux.git \
+            src
+          cd src
+          git submodule update --init --depth 1
+
+          echo "BATOCERA_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "BATOCERA_SHORT_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+          git log -1 --oneline
+
+      - name: "04 - Verify X96 Mate H616 target"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+
+          board="configs/batocera-h616.board"
+          genimage="board/batocera/allwinner/h616/x96-mate/genimage.cfg"
+
+          grep -q '^BR2_aarch64=y$' "$board"
+          grep -q '^BR2_cortex_a53=y$' "$board"
+          grep -q '^BR2_PACKAGE_BATOCERA_TARGET_H616=y$' "$board"
+          grep -q '^BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.1.5"$' "$board"
+          grep -q 'allwinner/sun50i-h616-x96-mate' "$board"
+          grep -q '^BR2_PACKAGE_BATOCERA_PANFROST_MESA3D=y$' "$board"
+          grep -q 'x96_mate/u-boot-sunxi-with-spl.bin' "$genimage"
+
+          echo "Target : H616 / aarch64 / Cortex-A53"
+          echo "Board  : X96 Mate"
+          echo "DTB    : sun50i-h616-x96-mate"
+          echo "GPU    : Mali-G31 / Panfrost"
+          echo "Kernel : 7.1.5 (current master at workflow creation)"
+          echo "U-Boot : uboot-multiboard/x96_mate"
+
+      - name: "05 - Restrict image generation to X96 Mate"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+
+          cat > batocera.mk <<'EOF'
+          OUTPUT_DIR ?= /mnt/batocera-build/output
+          DL_DIR ?= /mnt/batocera-build/dl
+          CCACHE_DIR ?= /mnt/batocera-build/ccache
+          $(call add-defconfig,BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate")
+          EOF
+
+          make vars
+
+      - name: "06 - Build official Batocera Docker environment"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+          make build-docker-image
+
+          echo
+          docker images
+          echo
+          df -h /mnt/batocera-build /
+
+      - name: "07 - Build Batocera H616 X96 Mate"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd /mnt/batocera-build/src
+          make h616-build
+
+      - name: "08 - Validate and stage image"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image_dir="/mnt/batocera-build/output/h616/images/batocera/images/x96-mate"
+
+          echo "===== BUILD OUTPUT ====="
+          find "$image_dir" -maxdepth 1 -type f -printf '%f  %s bytes\n' | sort
+
+          mapfile -t images < <(
+            find "$image_dir" -maxdepth 1 -type f \
+              -name 'batocera-h616-x96-mate-*.img.gz' | sort
+          )
+
+          if [ "${#images[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly one X96 Mate image, found ${#images[@]}"
+            exit 1
+          fi
+
+          image="${images[0]}"
+          test -s "$image"
+          test -s "$image.sha256"
+
+          expected="$(cat "$image.sha256")"
+          actual="$(sha256sum "$image" | awk '{print $1}')"
+          test "$expected" = "$actual"
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp -v "$image" "$GITHUB_WORKSPACE/artifacts/"
+          cp -v "$image.sha256" "$GITHUB_WORKSPACE/artifacts/"
+          cp -v "$image.md5" "$GITHUB_WORKSPACE/artifacts/"
+          cp -v "$image_dir/batocera.version" "$GITHUB_WORKSPACE/artifacts/"
+
+          cat > "$GITHUB_WORKSPACE/artifacts/BUILD-INFO.txt" <<EOF
+          Board: X96 Mate
+          SoC: Allwinner H616
+          Architecture: aarch64 / Cortex-A53
+          GPU: Mali-G31 / Panfrost
+          Batocera source: https://github.com/batocera-linux/batocera.linux
+          Batocera commit: ${BATOCERA_COMMIT}
+          Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          Image SHA256: ${actual}
+          EOF
+
+          echo "BATOCERA_IMAGE_NAME=$(basename "$image")" >> "$GITHUB_ENV"
+
+      - name: "09 - Upload X96 Mate image"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "Batocera-X96-Mate-H616-${{ env.BATOCERA_SHORT_COMMIT }}"
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: "10 - Summary"
+        shell: bash
+        run: |
+          {
+            echo "## Batocera X96 Mate H616"
+            echo
+            echo "- Image: \`${BATOCERA_IMAGE_NAME}\`"
+            echo "- Source commit: \`${BATOCERA_COMMIT}\`"
+            echo "- Target: \`h616\`"
+            echo "- Board image: \`allwinner/h616/x96-mate\`"
+            echo "- DTB: \`sun50i-h616-x96-mate\`"
+            echo "- Artifact retention: 30 days"
+          } >> "$GITHUB_STEP_SUMMARY"
