@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 360
     env:
       BATCH_MODE: "1"
+      DOCKER_OPTS: "-e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback"
 
     steps:
       - name: "01 - Maximize build disk"
@@ -168,6 +169,7 @@ jobs:
           grep -Fq 'ccache directory:   /mnt/batocera-build/ccache' /tmp/batocera-vars.txt
           grep -Fq 'BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate"' /tmp/batocera-vars.txt
           grep -Fq 'BR2_GNU_MIRROR="https://mirrors.ibiblio.org/gnu"' /tmp/batocera-vars.txt
+          grep -Fq 'CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback' /tmp/batocera-vars.txt
 
       - name: "07 - Build official Batocera Docker environment"
         shell: bash
@@ -295,5 +297,6 @@ jobs:
             echo "- GNU mirror: \`https://mirrors.ibiblio.org/gnu\`"
             echo "- Kodi Italian language: \`11.0.109\`"
             echo "- Obsolete Cedrus patch: disabled (already upstream)"
+            echo "- Cargo MSRV resolver: \`fallback\`"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
