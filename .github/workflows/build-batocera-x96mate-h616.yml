@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 360
     env:
       BATCH_MODE: "1"
+      PARALLEL_BUILD: "y"
+      MAKE_JLEVEL: "4"
+      MAKE_LLEVEL: "4"
       DOCKER_OPTS: "-e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback"
 
     steps:
@@ -186,6 +189,7 @@ jobs:
           grep -Fq 'BR2_TARGET_BATOCERA_IMAGES="allwinner/h616/x96-mate"' /tmp/batocera-vars.txt
           grep -Fq 'BR2_GNU_MIRROR="https://mirrors.ibiblio.org/gnu"' /tmp/batocera-vars.txt
           grep -Fq 'CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback' /tmp/batocera-vars.txt
+          grep -Fq 'Make options:       -j4 -l4' /tmp/batocera-vars.txt
 
       - name: "07 - Build official Batocera Docker environment"
         shell: bash
@@ -216,9 +220,7 @@ jobs:
             fi
 
             if [ "$attempt" -lt 4 ]; then
-              echo "Cleaning partial Buildroot package state before retry..."
-              rm -rf /mnt/batocera-build/output/h616/build
-
+              echo "Preserving current Buildroot state for retry..."
               sleep_seconds=$((attempt * 20))
               echo "Download/source attempt failed; retrying in ${sleep_seconds}s..."
               sleep "$sleep_seconds"
@@ -315,5 +317,7 @@ jobs:
             echo "- Obsolete Cedrus patch: disabled (already upstream)"
             echo "- Cargo MSRV resolver: \`fallback\`"
             echo "- cabextract 1.11: preseeded from Gentoo distfiles mirror"
+            echo "- Parallel Buildroot: \`-j4 -l4\`"
+            echo "- Source retry: preserves Buildroot state"
             echo "- Artifact retention: 30 days"
           } >> "$GITHUB_STEP_SUMMARY"
